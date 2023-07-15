@@ -135,12 +135,16 @@ class FlutterNearbyConnectionsPlugin : FlutterPlugin, MethodCallHandler, Activit
     }
 
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
-        channel.setMethodCallHandler(null)
-        serviceBindManager.mService?.stopAdvertising()
-        serviceBindManager.mService?.stopDiscovery()
-        serviceBindManager.unbindService()
-        locationHelper = null
-        exitProcess(0)
+        try {
+            channel.setMethodCallHandler(null)
+            serviceBindManager.mService?.stopAdvertising()
+            serviceBindManager.mService?.stopDiscovery()
+            serviceBindManager.unbindService()
+            locationHelper = null
+            exitProcess(0)
+        } catch (e: Exception) {
+            Log.d("nearby_connections", "onDetachedFromEngine: ${e.message}")
+        }
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
