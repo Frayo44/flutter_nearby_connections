@@ -199,7 +199,9 @@ class NetworkP2PManager {
                 to: endpoint, peerName: name, tag: NetworkP2PManager.frameTag)
 
             // The OS keeps trying (waiting state) much longer than a user
-            // would; bound the attempt ourselves.
+            // would; bound the attempt ourselves. Must stay under the app's
+            // 15s discovery countdown so a late connect can't fire after the
+            // UI already reported failure.
             let timeout = DispatchWorkItem { [weak self] in
                 guard let self = self,
                       let p = self.peers[name],
@@ -208,7 +210,7 @@ class NetworkP2PManager {
                 self.teardownPeerLocked(name, notify: true)
             }
             peer.connectTimeout = timeout
-            self.queue.asyncAfter(deadline: .now() + 30, execute: timeout)
+            self.queue.asyncAfter(deadline: .now() + 12, execute: timeout)
         }
     }
 
