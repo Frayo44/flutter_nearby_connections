@@ -17,7 +17,13 @@ class Device: NSObject {
     
     func createSession() {
         if self.session != nil { return }
-        self.session = MCSession(peer: MPCManager.instance.localPeerID, securityIdentity: nil, encryptionPreference: .required)
+        // .required makes the session negotiate DTLS during setup, which on
+        // recent iOS reliably fails (or crawls) over peer-to-peer WiFi/AWDL —
+        // i.e. whenever the phones don't share a WiFi network. .none trades
+        // link encryption for a connection that actually establishes there.
+        // Both peers must use the same preference: .none and .required
+        // sessions refuse each other.
+        self.session = MCSession(peer: MPCManager.instance.localPeerID, securityIdentity: nil, encryptionPreference: .none)
         self.session?.delegate = self
     }
     
@@ -29,9 +35,19 @@ class Device: NSObject {
     
     func invite(with browser: MCNearbyServiceBrowser) {
         if (self.state == MCSessionState.notConnected) {
+            // A session left over from a failed/timed-out attempt is dead
+            // weight — inviting into it silently goes nowhere. Start clean.
+            if self.session != nil {
+                self.session?.delegate = nil
+                self.session?.disconnect()
+                self.session = nil
+            }
             self.createSession()
             if let session = session {
-                browser.invitePeer(self.peerID, to: session, withContext: nil, timeout: 10)
+                // Peer-to-peer WiFi (no shared network) needs AWDL to sync up,
+                // which can take well over 10s; give the OS a real window.
+                print("[MPC] inviting \(self.peerID.displayName) (timeout 30)")
+                browser.invitePeer(self.peerID, to: session, withContext: nil, timeout: 30)
             }
         }
     }
@@ -39,6 +55,10 @@ class Device: NSObject {
 
 extension Device: MCSessionDelegate {
     public func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
+        // 0=notConnected 1=connecting 2=connected. connecting→notConnected on
+        // the inviter without the invitee ever logging "invitation received"
+        // means the invite was never delivered (ghost peer / AWDL down).
+        print("[MPC] session \(peerID.displayName) -> \(state.rawValue)")
         self.state = state
         NotificationCenter.default.post(name: MPCManager.Notifications.deviceDidChangeState, object: nil)
     }

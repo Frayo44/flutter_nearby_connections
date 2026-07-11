@@ -49,6 +49,21 @@ class MPCManager: NSObject {
     }
     
     func setup(serviceType: String, deviceName: String) {
+        // Re-setup happens on every return to the search screen. Shut the
+        // previous run down first: a lingering advertiser keeps the old name
+        // visible on peers (ghost entries), and stale devices otherwise stay
+        // in `devices` forever since nothing else clears the singleton.
+        self.advertiser?.stopAdvertisingPeer()
+        self.browser?.stopBrowsingForPeers()
+        for device in self.devices {
+            device.disconnect()
+        }
+        self.devices = []
+        if let existingObserver = enterbackgroundNotification {
+            NotificationCenter.default.removeObserver(existingObserver)
+            enterbackgroundNotification = nil
+        }
+
         if let data = UserDefaults.standard.data(forKey: deviceName), let id = NSKeyedUnarchiver.unarchiveObject(with: data) as? MCPeerID {
             self.localPeerID = id
         } else {
@@ -58,9 +73,13 @@ class MPCManager: NSObject {
             self.localPeerID = peerID
         }
         
+        // Build marker: proves the local fork's native code (and not a stale
+        // pod) is in the installed app when reading `flutter run` logs.
+        print("[MPC] setup service=\(serviceType) device=\(deviceName) (fork: enc=.none inviteTimeout=30)")
+
         self.advertiser = MCNearbyServiceAdvertiser(peer: localPeerID, discoveryInfo: nil, serviceType: serviceType)
         self.advertiser.delegate = self
-        
+
         self.browser = MCNearbyServiceBrowser(peer: localPeerID, serviceType: serviceType)
         self.browser.delegate = self
         enterbackgroundNotification = NotificationCenter.default.addObserver(
@@ -156,6 +175,9 @@ class MPCManager: NSObject {
 
 extension MPCManager: MCNearbyServiceAdvertiserDelegate {
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
+        // Seeing this on the invitee proves the invitation crossed the radio;
+        // a failure after it is session establishment, not delivery.
+        print("[MPC] invitation received from \(peerID.displayName), accepting")
         let device = self.addNewDevice(for: peerID)
         device.createSession()
         invitationHandler(true, device.session)

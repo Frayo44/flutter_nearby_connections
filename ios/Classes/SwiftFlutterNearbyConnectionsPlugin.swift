@@ -6,19 +6,38 @@ import SwiftyJSON
 let SERVICE_TYPE = "ioscreator-chat"
 let INVOKE_CHANGE_STATE_METHOD = "invoke_change_state_method"
 let INVOKE_MESSAGE_RECEIVE_METHOD = "invoke_message_receive_method"
+let INVOKE_BINARY_RECEIVE_METHOD = "invoke_binary_receive_method"
+let INVOKE_COMMAND_BINARY_RECEIVE_METHOD = "invoke_command_binary_receive_method"
+
+// First byte of every binary payload, routing it to the right logical channel.
+// JSON messages always start with '{' (0x7B), so text and binary coexist on
+// one MCSession.
+//   0x02 — frame channel: preview frames, unreliable (stale frames drop)
+//   0x03 — command channel: protobuf commands + full-quality photos, reliable
+let BINARY_PAYLOAD_MARKER: UInt8 = 0x02
+let COMMAND_BINARY_PAYLOAD_MARKER: UInt8 = 0x03
+
+// On iOS 26, MultipeerConnectivity session establishment fails over
+// peer-to-peer WiFi (AWDL) even though the radio path works — verified with a
+// Network-framework probe. This flag routes the whole engine to
+// NetworkP2PManager (NWListener/NWBrowser/NWConnection with includePeerToPeer)
+// behind the SAME method-channel contract; flip to false to fall back to MPC.
+let USE_NETWORK_P2P = true
 
 enum MethodCall: String {
     case initNearbyService = "init_nearby_service"
     case startAdvertisingPeer = "start_advertising_peer"
     case startBrowsingForPeers = "start_browsing_for_peers"
-    
+
     case stopAdvertisingPeer = "stop_advertising_peer"
     case stopBrowsingForPeers = "stop_browsing_for_peers"
-    
+
     case invitePeer = "invite_peer"
     case disconnectPeer = "disconnect_peer"
-    
+
     case sendMessage = "send_message"
+    case sendBinary = "send_binary"
+    case sendCommandBinary = "send_command_binary"
 }
 
 public class SwiftFlutterNearbyConnectionsPlugin: NSObject, FlutterPlugin {
@@ -60,14 +79,40 @@ public class SwiftFlutterNearbyConnectionsPlugin: NSObject, FlutterPlugin {
     
     @objc func stateChanged(){
         let devices = MPCManager.instance.devices.compactMap({return DeviceJson(deviceId: $0.peerID.displayName, deviceName: $0.peerID.displayName, state: $0.state.rawValue)})
-        channel.invokeMethod(INVOKE_CHANGE_STATE_METHOD, arguments: JSON(devices.compactMap({return $0.toStringAnyObject()})).rawString())
+        let arguments = JSON(devices.compactMap({return $0.toStringAnyObject()})).rawString()
+        // MCSession delegates fire on a background queue; platform channel
+        // calls off the main thread get dropped by newer Flutter engines —
+        // a lost "connected" event here strands the app on the search screen.
+        DispatchQueue.main.async {
+            self.channel.invokeMethod(INVOKE_CHANGE_STATE_METHOD, arguments: arguments)
+        }
     }
     
     @objc func messageReceived(notification: Notification) {
         do {
-            if let data = notification.userInfo?["data"] as? Data, let stringData = JSON(data).rawString() {
+            guard let data = notification.userInfo?["data"] as? Data else { return }
+            let marker = data.first
+            if marker == BINARY_PAYLOAD_MARKER || marker == COMMAND_BINARY_PAYLOAD_MARKER {
+                let method = marker == BINARY_PAYLOAD_MARKER
+                    ? INVOKE_BINARY_RECEIVE_METHOD
+                    : INVOKE_COMMAND_BINARY_RECEIVE_METHOD
+                let deviceId = (notification.userInfo?["from"] as? MCPeerID)?.displayName ?? ""
+                let payload = FlutterStandardTypedData(bytes: data.dropFirst())
+                // MCSession delegates fire on a background queue; platform
+                // channel calls must happen on the main thread.
+                DispatchQueue.main.async {
+                    self.channel.invokeMethod(method, arguments: [
+                        "deviceId": deviceId,
+                        "data": payload,
+                    ] as [String: Any])
+                }
+                return
+            }
+            if let stringData = JSON(data).rawString() {
                 let dict = convertToDictionary(text: stringData)
-                self.channel.invokeMethod(INVOKE_MESSAGE_RECEIVE_METHOD, arguments: dict)
+                DispatchQueue.main.async {
+                    self.channel.invokeMethod(INVOKE_MESSAGE_RECEIVE_METHOD, arguments: dict)
+                }
             }
         } catch let e {
             print(e.localizedDescription)
@@ -99,6 +144,10 @@ public class SwiftFlutterNearbyConnectionsPlugin: NSObject, FlutterPlugin {
     }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        if USE_NETWORK_P2P, #available(iOS 13.0, *) {
+            handleNetworkP2P(call, result: result)
+            return
+        }
         switch MethodCall(rawValue: call.method) {
         case .initNearbyService:
             guard let data = call.arguments as? Dictionary<String, AnyObject> else {
@@ -170,10 +219,134 @@ public class SwiftFlutterNearbyConnectionsPlugin: NSObject, FlutterPlugin {
                 print(error)
             }
             result(false)
+        case .sendBinary:
+            guard let dict = call.arguments as? Dictionary<String, AnyObject>,
+                  let deviceId = dict["deviceId"] as? String,
+                  let typedData = dict["data"] as? FlutterStandardTypedData,
+                  let device = MPCManager.instance.findDevice(for: deviceId) else {
+                result(false)
+                return
+            }
+            let reliable = dict["reliable"] as? Bool ?? false
+            var payload = Data([BINARY_PAYLOAD_MARKER])
+            payload.append(typedData.data)
+            do {
+                try device.send(data: payload, mode: reliable ? .reliable : .unreliable)
+                result(true)
+            } catch {
+                // Unreliable sends have a size cap; retry the frame reliably
+                // rather than dropping it with an error.
+                do {
+                    try device.send(data: payload, mode: .reliable)
+                    result(true)
+                } catch {
+                    result(false)
+                }
+            }
+        case .sendCommandBinary:
+            guard let dict = call.arguments as? Dictionary<String, AnyObject>,
+                  let deviceId = dict["deviceId"] as? String,
+                  let typedData = dict["data"] as? FlutterStandardTypedData,
+                  let device = MPCManager.instance.findDevice(for: deviceId) else {
+                result(false)
+                return
+            }
+            currentReceivedDevice = device
+            var payload = Data([COMMAND_BINARY_PAYLOAD_MARKER])
+            payload.append(typedData.data)
+            do {
+                // Commands (and full-quality photos) must arrive intact and in
+                // order, so always reliable.
+                try device.send(data: payload, mode: .reliable)
+                result(true)
+            } catch {
+                result(false)
+            }
         default:
             result(FlutterMethodNotImplemented)
             return
         }
     }
-    
+
+    /// The Network-framework engine behind the same method-channel contract
+    /// the MPC engine served — the Dart side cannot tell them apart.
+    @available(iOS 13.0, *)
+    private func handleNetworkP2P(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let manager = NetworkP2PManager.instance
+        switch MethodCall(rawValue: call.method) {
+        case .initNearbyService:
+            guard let data = call.arguments as? Dictionary<String, AnyObject> else {
+                result(false)
+                return
+            }
+            let serviceType: String = data["serviceType"] as? String ?? SERVICE_TYPE
+            var deviceName: String = data["deviceName"] as? String ?? ""
+            if deviceName.isEmpty {
+                deviceName = UIDevice.current.name
+            }
+            manager.emit = { [weak self] method, arguments in
+                // Platform-channel calls must happen on the main thread.
+                DispatchQueue.main.async {
+                    self?.channel.invokeMethod(method, arguments: arguments)
+                }
+            }
+            manager.setup(serviceType: serviceType, deviceName: deviceName)
+            result(true)
+        case .startAdvertisingPeer:
+            manager.startAdvertising()
+            result(true)
+        case .startBrowsingForPeers:
+            manager.startBrowsing()
+            result(true)
+        case .stopAdvertisingPeer:
+            manager.stopAdvertising()
+            result(true)
+        case .stopBrowsingForPeers:
+            manager.stopBrowsing()
+            result(true)
+        case .invitePeer:
+            guard let data = call.arguments as? Dictionary<String, AnyObject>,
+                  let deviceId = data["deviceId"] as? String else {
+                result(false)
+                return
+            }
+            manager.invite(deviceId)
+            result(true)
+        case .disconnectPeer:
+            guard let data = call.arguments as? Dictionary<String, AnyObject>,
+                  let deviceId = data["deviceId"] as? String else {
+                result(false)
+                return
+            }
+            manager.disconnect(deviceId)
+            result(true)
+        case .sendMessage:
+            // Legacy JSON-text path; unused since protocol v3 moved commands
+            // to the binary channel.
+            result(false)
+        case .sendBinary:
+            guard let dict = call.arguments as? Dictionary<String, AnyObject>,
+                  let deviceId = dict["deviceId"] as? String,
+                  let typedData = dict["data"] as? FlutterStandardTypedData else {
+                result(false)
+                return
+            }
+            manager.sendFrame(deviceId, data: typedData.data) { ok in
+                DispatchQueue.main.async { result(ok) }
+            }
+        case .sendCommandBinary:
+            guard let dict = call.arguments as? Dictionary<String, AnyObject>,
+                  let deviceId = dict["deviceId"] as? String,
+                  let typedData = dict["data"] as? FlutterStandardTypedData else {
+                result(false)
+                return
+            }
+            manager.sendCommand(deviceId, data: typedData.data) { ok in
+                DispatchQueue.main.async { result(ok) }
+            }
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
 }

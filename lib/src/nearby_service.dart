@@ -8,8 +8,12 @@ const _stopBrowsingForPeers = 'stop_browsing_for_peers';
 const _invitePeer = 'invite_peer';
 const _disconnectPeer = 'disconnect_peer';
 const _sendMessage = 'send_message';
+const _sendBinary = 'send_binary';
+const _sendCommandBinary = 'send_command_binary';
 const _invokeChangeStateMethod = "invoke_change_state_method";
 const _invokeMessageReceiveMethod = "invoke_message_receive_method";
+const _invokeBinaryReceiveMethod = "invoke_binary_receive_method";
+const _invokeCommandBinaryReceiveMethod = "invoke_command_binary_receive_method";
 const _invokeNearbyRunning = "nearby_running";
 
 /// [StateChangedCallback] is used to call back an object under List<Device>.
@@ -19,6 +23,17 @@ typedef StateChangedCallback = Function(List<Device> arguments);
 /// [DataReceivedCallback] is used to call back an object under List<Device>.
 /// [DataReceivedCallback] will call when you register in [dataReceivedSubscription]
 typedef DataReceivedCallback = Function(dynamic data);
+
+/// [BinaryReceivedCallback] fires for raw binary payloads sent with
+/// [NearbyService.sendBinary] or [NearbyService.sendCommandBinary]. iOS only.
+typedef BinaryReceivedCallback = Function(String deviceId, Uint8List data);
+
+class _BinaryMessage {
+  final String deviceId;
+  final Uint8List data;
+
+  _BinaryMessage(this.deviceId, this.data);
+}
 
 class NearbyService {
   static const MethodChannel _channel =
@@ -32,6 +47,18 @@ class NearbyService {
   final _dataReceivedController = StreamController<dynamic>.broadcast();
 
   Stream<dynamic> get _dataReceivedStream => _dataReceivedController.stream;
+
+  final _binaryReceivedController =
+      StreamController<_BinaryMessage>.broadcast();
+
+  Stream<_BinaryMessage> get _binaryReceivedStream =>
+      _binaryReceivedController.stream;
+
+  final _commandBinaryReceivedController =
+      StreamController<_BinaryMessage>.broadcast();
+
+  Stream<_BinaryMessage> get _commandBinaryReceivedStream =>
+      _commandBinaryReceivedController.stream;
   String? _deviceName;
 
   /// The class [NearbyService] supports the discovery of services provided by
@@ -59,7 +86,13 @@ class NearbyService {
         serviceType.isNotEmpty);
 
     _channel.setMethodCallHandler((handler) async {
-      debugPrint("method: ${handler.method} | arguments: ${handler.arguments}");
+      // Binary payloads arrive at frame-stream rates (and command binaries
+      // carry full photos); logging them would dump tens of KB per message.
+      if (handler.method != _invokeBinaryReceiveMethod &&
+          handler.method != _invokeCommandBinaryReceiveMethod) {
+        debugPrint(
+            "method: ${handler.method} | arguments: ${handler.arguments}");
+      }
       switch (handler.method) {
         case _invokeChangeStateMethod:
           List<Device> devices = jsonDecode(handler.arguments)
@@ -71,6 +104,16 @@ class NearbyService {
           _dataReceivedController.add(handler.arguments);
           debugPrint(
               "_invokeMessageReceiveMethod | arguments: ${handler.arguments}");
+          break;
+        case _invokeBinaryReceiveMethod:
+          final args = handler.arguments as Map;
+          _binaryReceivedController.add(_BinaryMessage(
+              args["deviceId"] as String, args["data"] as Uint8List));
+          break;
+        case _invokeCommandBinaryReceiveMethod:
+          final args = handler.arguments as Map;
+          _commandBinaryReceivedController.add(_BinaryMessage(
+              args["deviceId"] as String, args["data"] as Uint8List));
           break;
         case _invokeNearbyRunning:
           await Future.delayed(Duration(seconds: 1));
@@ -166,6 +209,31 @@ class NearbyService {
     });
   }
 
+  /// Sends raw bytes to a peer with no JSON/string round-trip — suited for
+  /// high-frequency payloads such as preview frames. With [reliable] false the
+  /// message may be dropped under load instead of queueing (MPC .unreliable),
+  /// which keeps a frame stream live instead of lagging. iOS only.
+  FutureOr<dynamic> sendBinary(String deviceID, Uint8List data,
+      {bool reliable = false}) async {
+    await _channel.invokeMethod(_sendBinary, <String, dynamic>{
+      'deviceId': deviceID,
+      'data': data,
+      'reliable': reliable,
+    });
+  }
+
+  /// Sends raw bytes over the command channel: always reliable (ordered,
+  /// guaranteed) with no JSON/string round-trip. Suited for control messages
+  /// and larger one-off payloads such as full-quality photos. Delivered to
+  /// [commandBinaryReceivedSubscription], separate from [sendBinary]'s frame
+  /// channel. iOS only.
+  FutureOr<dynamic> sendCommandBinary(String deviceID, Uint8List data) async {
+    await _channel.invokeMethod(_sendCommandBinary, <String, dynamic>{
+      'deviceId': deviceID,
+      'data': data,
+    });
+  }
+
   /// [stateChangedSubscription] helps you listen to the changes of peers with
   /// the circumstances: find a new peer, a peer is invited, a peer is disconnected,
   /// a peer is invited to connect by another peer, or 2 peers are connected.
@@ -182,4 +250,18 @@ class NearbyService {
   StreamSubscription dataReceivedSubscription(
       {required DataReceivedCallback callback}) =>
       _dataReceivedStream.listen(callback);
+
+  /// Listens for raw binary payloads sent by a peer via [sendBinary]
+  /// (the frame channel).
+  /// see [BinaryReceivedCallback]
+  StreamSubscription binaryReceivedSubscription(
+      {required BinaryReceivedCallback callback}) =>
+      _binaryReceivedStream.listen((m) => callback(m.deviceId, m.data));
+
+  /// Listens for raw binary payloads sent by a peer via [sendCommandBinary]
+  /// (the command channel).
+  /// see [BinaryReceivedCallback]
+  StreamSubscription commandBinaryReceivedSubscription(
+      {required BinaryReceivedCallback callback}) =>
+      _commandBinaryReceivedStream.listen((m) => callback(m.deviceId, m.data));
 }

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import MultipeerConnectivity
 import SwiftyJSON
 
 struct Message: Codable {
@@ -23,6 +24,10 @@ extension Device {
     
     func send(data: Data) throws {
         try self.session?.send(data, toPeers: [self.peerID], with: .reliable)
+    }
+
+    func send(data: Data, mode: MCSessionSendDataMode) throws {
+        try self.session?.send(data, toPeers: [self.peerID], with: mode)
     }
 }
 
