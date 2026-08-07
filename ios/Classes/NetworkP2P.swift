@@ -62,6 +62,7 @@ class NetworkP2PManager {
     private var discovered: [String: NWEndpoint] = [:]
     private var peers: [String: Peer] = [:]
     private var backgroundObserver: NSObjectProtocol?
+    private var foregroundObserver: NSObjectProtocol?
 
     private func p2pParameters() -> NWParameters {
         let params = NWParameters.tcp
@@ -94,6 +95,14 @@ class NetworkP2PManager {
                 self?.queue.async { self?.enteredBackgroundLocked() }
             }
         }
+        if foregroundObserver == nil {
+            foregroundObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil, queue: nil
+            ) { [weak self] _ in
+                self?.queue.async { self?.enteredForegroundLocked() }
+            }
+        }
     }
 
     private func enteredBackgroundLocked() {
@@ -104,26 +113,48 @@ class NetworkP2PManager {
         }
     }
 
+    // Suspension kills the listener and the browser, but leaves both
+    // properties non-nil - and startAdvertising()/startBrowsing() return
+    // early when they are non-nil. Without this, an app that has been
+    // backgrounded once comes back permanently undiscoverable and unable
+    // to discover anyone, and every later restart request is a silent
+    // no-op. Rebuild whatever was running before we went away.
+    private func enteredForegroundLocked() {
+        let wasAdvertising = listener != nil
+        let wasBrowsing = browser != nil
+        print("[NP2P] foreground: rebuilding advertising=\(wasAdvertising) browsing=\(wasBrowsing)")
+        if wasAdvertising {
+            stopListenerLocked()
+            startAdvertisingLocked()
+        }
+        if wasBrowsing {
+            stopBrowserLocked()
+            startBrowsingLocked()
+        }
+    }
+
     // MARK: - Advertise / Browse
 
     func startAdvertising() {
-        queue.async {
-            if self.listener != nil { return }
-            do {
-                let listener = try NWListener(using: self.p2pParameters())
-                listener.service = NWListener.Service(
-                    name: self.myName, type: self.bonjourType)
-                listener.stateUpdateHandler = { state in
-                    print("[NP2P] listener: \(state)")
-                }
-                listener.newConnectionHandler = { [weak self] conn in
-                    self?.handleIncoming(conn)
-                }
-                listener.start(queue: self.queue)
-                self.listener = listener
-            } catch {
-                print("[NP2P] listener error: \(error)")
+        queue.async { self.startAdvertisingLocked() }
+    }
+
+    private func startAdvertisingLocked() {
+        if self.listener != nil { return }
+        do {
+            let listener = try NWListener(using: self.p2pParameters())
+            listener.service = NWListener.Service(
+                name: self.myName, type: self.bonjourType)
+            listener.stateUpdateHandler = { state in
+                print("[NP2P] listener: \(state)")
             }
+            listener.newConnectionHandler = { [weak self] conn in
+                self?.handleIncoming(conn)
+            }
+            listener.start(queue: self.queue)
+            self.listener = listener
+        } catch {
+            print("[NP2P] listener error: \(error)")
         }
     }
 
@@ -137,28 +168,30 @@ class NetworkP2PManager {
     }
 
     func startBrowsing() {
-        queue.async {
-            if self.browser != nil { return }
-            let browser = NWBrowser(
-                for: .bonjour(type: self.bonjourType, domain: nil),
-                using: self.p2pParameters())
-            browser.stateUpdateHandler = { state in
-                print("[NP2P] browser: \(state)")
-            }
-            browser.browseResultsChangedHandler = { [weak self] results, _ in
-                guard let self = self else { return }
-                self.discovered.removeAll()
-                for result in results {
-                    if case let NWEndpoint.service(name, _, _, _) = result.endpoint,
-                       name != self.myName {
-                        self.discovered[name] = result.endpoint
-                    }
-                }
-                self.emitStateListLocked()
-            }
-            browser.start(queue: self.queue)
-            self.browser = browser
+        queue.async { self.startBrowsingLocked() }
+    }
+
+    private func startBrowsingLocked() {
+        if self.browser != nil { return }
+        let browser = NWBrowser(
+            for: .bonjour(type: self.bonjourType, domain: nil),
+            using: self.p2pParameters())
+        browser.stateUpdateHandler = { state in
+            print("[NP2P] browser: \(state)")
         }
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self = self else { return }
+            self.discovered.removeAll()
+            for result in results {
+                if case let NWEndpoint.service(name, _, _, _) = result.endpoint,
+                   name != self.myName {
+                    self.discovered[name] = result.endpoint
+                }
+            }
+            self.emitStateListLocked()
+        }
+        browser.start(queue: self.queue)
+        self.browser = browser
     }
 
     func stopBrowsing() {
