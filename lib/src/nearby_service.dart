@@ -15,6 +15,7 @@ const _invokeMessageReceiveMethod = "invoke_message_receive_method";
 const _invokeBinaryReceiveMethod = "invoke_binary_receive_method";
 const _invokeCommandBinaryReceiveMethod = "invoke_command_binary_receive_method";
 const _invokeNearbyRunning = "nearby_running";
+const _invokeTransportStateMethod = "invoke_transport_state_method";
 
 /// [StateChangedCallback] is used to call back an object under List<Device>.
 /// [StateChangedCallback] will call when you register in [stateChangedSubscription]
@@ -27,6 +28,14 @@ typedef DataReceivedCallback = Function(dynamic data);
 /// [BinaryReceivedCallback] fires for raw binary payloads sent with
 /// [NearbyService.sendBinary] or [NearbyService.sendCommandBinary]. iOS only.
 typedef BinaryReceivedCallback = Function(String deviceId, Uint8List data);
+
+/// [TransportStateCallback] fires when the underlying transport engine
+/// changes state ([component] is "listener" or "browser"; [state] is
+/// "ready", "waiting" or "failed"; [error] is the platform error text, empty
+/// for "ready"). A browser entering "waiting" is how iOS reports a denied
+/// Local Network permission. iOS only.
+typedef TransportStateCallback = Function(
+    String component, String state, String error);
 
 class _BinaryMessage {
   final String deviceId;
@@ -59,6 +68,12 @@ class NearbyService {
 
   Stream<_BinaryMessage> get _commandBinaryReceivedStream =>
       _commandBinaryReceivedController.stream;
+
+  final _transportStateController =
+      StreamController<Map<String, String>>.broadcast();
+
+  Stream<Map<String, String>> get _transportStateStream =>
+      _transportStateController.stream;
   String? _deviceName;
 
   /// The class [NearbyService] supports the discovery of services provided by
@@ -118,6 +133,14 @@ class NearbyService {
         case _invokeNearbyRunning:
           await Future.delayed(Duration(seconds: 1));
           callback(handler.arguments as bool);
+          break;
+        case _invokeTransportStateMethod:
+          final args = handler.arguments as Map;
+          _transportStateController.add({
+            "component": args["component"] as String? ?? "",
+            "state": args["state"] as String? ?? "",
+            "error": args["error"] as String? ?? "",
+          });
           break;
       }
     });
@@ -264,4 +287,14 @@ class NearbyService {
   StreamSubscription commandBinaryReceivedSubscription(
       {required BinaryReceivedCallback callback}) =>
       _commandBinaryReceivedStream.listen((m) => callback(m.deviceId, m.data));
+
+  /// Listens for state changes of the underlying transport engine
+  /// (listener/browser ready, waiting or failed). A browser entering
+  /// "waiting" is how iOS reports a denied Local Network permission,
+  /// including a revocation mid-session. iOS only.
+  /// see [TransportStateCallback]
+  StreamSubscription transportStateSubscription(
+      {required TransportStateCallback callback}) =>
+      _transportStateStream.listen(
+          (m) => callback(m["component"]!, m["state"]!, m["error"]!));
 }

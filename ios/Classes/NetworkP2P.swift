@@ -145,8 +145,18 @@ class NetworkP2PManager {
             let listener = try NWListener(using: self.p2pParameters())
             listener.service = NWListener.Service(
                 name: self.myName, type: self.bonjourType)
-            listener.stateUpdateHandler = { state in
+            listener.stateUpdateHandler = { [weak self] state in
                 print("[NP2P] listener: \(state)")
+                switch state {
+                case .ready:
+                    self?.emitTransportState("listener", "ready", error: nil)
+                case .waiting(let error):
+                    self?.emitTransportState("listener", "waiting", error: error)
+                case .failed(let error):
+                    self?.emitTransportState("listener", "failed", error: error)
+                default:
+                    break
+                }
             }
             listener.newConnectionHandler = { [weak self] conn in
                 self?.handleIncoming(conn)
@@ -155,7 +165,20 @@ class NetworkP2PManager {
             self.listener = listener
         } catch {
             print("[NP2P] listener error: \(error)")
+            emitTransportState("listener", "failed", error: error)
         }
+    }
+
+    /// Real transport failures belong to the app, not the console: a browser
+    /// entering .waiting is how iOS reports a denied Local Network permission
+    /// (including mid-session revocation).
+    private func emitTransportState(_ component: String, _ state: String,
+                                    error: Error?) {
+        emit?(INVOKE_TRANSPORT_STATE_METHOD, [
+            "component": component,
+            "state": state,
+            "error": error.map { String(describing: $0) } ?? "",
+        ])
     }
 
     func stopAdvertising() {
@@ -176,8 +199,18 @@ class NetworkP2PManager {
         let browser = NWBrowser(
             for: .bonjour(type: self.bonjourType, domain: nil),
             using: self.p2pParameters())
-        browser.stateUpdateHandler = { state in
+        browser.stateUpdateHandler = { [weak self] state in
             print("[NP2P] browser: \(state)")
+            switch state {
+            case .ready:
+                self?.emitTransportState("browser", "ready", error: nil)
+            case .waiting(let error):
+                self?.emitTransportState("browser", "waiting", error: error)
+            case .failed(let error):
+                self?.emitTransportState("browser", "failed", error: error)
+            default:
+                break
+            }
         }
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self = self else { return }

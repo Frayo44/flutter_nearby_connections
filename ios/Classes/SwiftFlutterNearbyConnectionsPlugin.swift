@@ -8,6 +8,7 @@ let INVOKE_CHANGE_STATE_METHOD = "invoke_change_state_method"
 let INVOKE_MESSAGE_RECEIVE_METHOD = "invoke_message_receive_method"
 let INVOKE_BINARY_RECEIVE_METHOD = "invoke_binary_receive_method"
 let INVOKE_COMMAND_BINARY_RECEIVE_METHOD = "invoke_command_binary_receive_method"
+let INVOKE_TRANSPORT_STATE_METHOD = "invoke_transport_state_method"
 
 // First byte of every binary payload, routing it to the right logical channel.
 // JSON messages always start with '{' (0x7B), so text and binary coexist on
